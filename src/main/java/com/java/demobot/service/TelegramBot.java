@@ -1,20 +1,26 @@
 package com.java.demobot.service;
 
 import com.java.demobot.config.BotConfig;
+import com.java.demobot.model.Ads;
+import com.java.demobot.model.AdsRepository;
 import com.java.demobot.model.User;
 import com.java.demobot.model.UserRepository;
 import com.vdurmont.emoji.EmojiParser;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.commands.SetMyCommands;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
 import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.commands.BotCommand;
 import org.telegram.telegrambots.meta.api.objects.commands.scope.BotCommandScopeDefault;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
@@ -27,7 +33,15 @@ import java.util.List;
 public class TelegramBot extends TelegramLongPollingBot {
 
     private final UserRepository userRepository;
+
+    private final AdsRepository adsRepository;
     private final BotConfig config;
+
+    private final String YES_BUTTON = "YES_BUTTON";
+
+    private final String NO_BUTTON = "NO_BUTTON";
+
+    private final String ERROR_TEXT = "Error occurred: ";
 
     private static final String HELP_TEXT = "This bot created to demonstrate Spring Framework capabilities.\n\n" +
             "Use commands from main menu or typing a command for what you want to bot do. Here is commands: \n\n" +
@@ -38,7 +52,7 @@ public class TelegramBot extends TelegramLongPollingBot {
             "Type /help to see this message again.";
 
 
-    public TelegramBot(BotConfig config, UserRepository userRepository) {
+    public TelegramBot(BotConfig config, UserRepository userRepository, AdsRepository adsRepository) {
 
         this.config = config;
         List<BotCommand> listOfCommands = new ArrayList<>();
@@ -53,6 +67,7 @@ public class TelegramBot extends TelegramLongPollingBot {
             log.error("Error setting bot command's list " + e.getMessage());
         }
         this.userRepository = userRepository;
+        this.adsRepository = adsRepository;
     }
 
     @Override
@@ -70,15 +85,72 @@ public class TelegramBot extends TelegramLongPollingBot {
         if (update.hasMessage() && update.getMessage().hasText()) {
             String message = update.getMessage().getText();
             long chatId = update.getMessage().getChatId();
-            switch (message) {
-                case "/start" -> {
-                    registerUser(update.getMessage());
-                    startCommandReceived(chatId, update.getMessage().getChat().getFirstName());
+
+            if (message.contains("/send") && config.getOwnerId() == chatId) {
+                var textToSend = EmojiParser.parseToUnicode(message.substring(message.indexOf(" ")));
+                var users = userRepository.findAll();
+                messageToAllUsers(users, textToSend);
+            } else {
+                switch (message) {
+                    case "/start" -> {
+                        registerUser(update.getMessage());
+                        startCommandReceived(chatId, update.getMessage().getChat().getFirstName());
+                    }
+                    case "/help" -> prepareAndSetMessage(chatId, HELP_TEXT);
+
+
+                    case "/register" -> {
+                        register(chatId);
+                    }
+
+
+                    default -> prepareAndSetMessage(chatId, "Sorry, I do not support this command.");
                 }
-                case "/help" -> sendMessage(chatId, HELP_TEXT);
-                default -> sendMessage(chatId, "Sorry, I do not support this command.");
             }
+        } else if (update.hasCallbackQuery()) {
+            String callbackData = update.getCallbackQuery().getData();
+            long messageId = update.getCallbackQuery().getMessage().getMessageId();
+            long chatId = update.getCallbackQuery().getMessage().getChatId();
+
+            if (callbackData.equals(YES_BUTTON)) {
+                String text = "You pressed YES button.";
+                executeEditMessageText(chatId, messageId, text);
+
+            } else if (callbackData.equals(NO_BUTTON)) {
+                String text = "You pressed NO button.";
+                executeEditMessageText(chatId, messageId, text);
+            }
+
         }
+    }
+
+    private void register(long chatId) {
+        SendMessage message = new SendMessage();
+        message.setChatId(chatId);
+        message.setText("Do you want to register?");
+
+        InlineKeyboardMarkup markupInLine = new InlineKeyboardMarkup();
+
+        List<List<InlineKeyboardButton>> rowsInLine = new ArrayList<>();
+        List<InlineKeyboardButton> rowInLine = new ArrayList<>();
+        var yesButton = new InlineKeyboardButton();
+
+        yesButton.setText("Yes");
+        yesButton.setCallbackData(YES_BUTTON);
+
+        var noButton = new InlineKeyboardButton();
+
+        noButton.setText("No");
+        noButton.setCallbackData(NO_BUTTON);
+
+        rowInLine.add(yesButton);
+        rowInLine.add(noButton);
+        rowsInLine.add(rowInLine);
+
+        markupInLine.setKeyboard(rowsInLine);
+        message.setReplyMarkup(markupInLine);
+
+        executeMessage(message);
     }
 
     private void registerUser(Message message) {
@@ -108,15 +180,11 @@ public class TelegramBot extends TelegramLongPollingBot {
         message.setChatId(chatId);
         message.setText(textToSend);
 
-        ReplyKeyboardMarkup replyKeyboardMarkup = createKeyboard(message);
-        try {
-            execute(message);
-        } catch (TelegramApiException e) {
-            log.error("Error occurred: " + e.getMessage());
-        }
+        createKeyboard(message);
+        executeMessage(message);
     }
 
-    private ReplyKeyboardMarkup createKeyboard(SendMessage message){
+    private void createKeyboard(SendMessage message) {
         ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
         List<KeyboardRow> keyboardRows = new ArrayList<>();
         KeyboardRow row = new KeyboardRow();
@@ -137,7 +205,49 @@ public class TelegramBot extends TelegramLongPollingBot {
         keyboardMarkup.setKeyboard(keyboardRows);
 
         message.setReplyMarkup(keyboardMarkup);
+    }
 
-        return keyboardMarkup;
+    private void executeEditMessageText(long chatId, long messageId, String text) {
+        EditMessageText message = new EditMessageText();
+        message.setChatId(chatId);
+        message.setText(text);
+        message.setMessageId((int) messageId);
+
+        try {
+            execute(message);
+        } catch (TelegramApiException e) {
+            log.error(ERROR_TEXT + e.getMessage());
+        }
+    }
+
+    private void executeMessage(SendMessage message) {
+
+        try {
+            execute(message);
+        } catch (TelegramApiException e) {
+            log.error(ERROR_TEXT + e.getMessage());
+        }
+    }
+
+    private void prepareAndSetMessage(long chatId, String textToSend) {
+        SendMessage message = new SendMessage();
+        message.setChatId(chatId);
+        message.setText(textToSend);
+        executeMessage(message);
+    }
+
+    @Scheduled(cron = "${cron.scheduler}")
+    private void sendAds() {
+        var ads = adsRepository.findAll();
+        var users = userRepository.findAll();
+        for (Ads ad : ads) {
+            messageToAllUsers(users, ad.getAd());
+        }
+    }
+
+    private void messageToAllUsers(List<User> users, String textToSend) {
+        for (User user : users) {
+            prepareAndSetMessage(user.getChatId(), textToSend);
+        }
     }
 }
